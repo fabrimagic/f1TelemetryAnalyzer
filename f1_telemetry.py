@@ -3,6 +3,7 @@ import math
 
 import fastf1
 from fastf1 import plotting
+import numpy as np
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -41,6 +42,7 @@ class F1TelemetryApp:
         self.laps = None       # Laps del pilota selezionato
         self.selected_driver_abbrev = None
         self.current_telemetry = []
+        self.multi_telemetry = []
 
         self.point_detail_var = tk.StringVar(
             value="Clicca sul grafico della velocità per vedere il dettaglio."
@@ -729,6 +731,7 @@ class F1TelemetryApp:
 
     def plot_multi_driver_telemetry(self, selections):
         self.current_telemetry = []
+        self.multi_telemetry = []
         self._clear_axes()
         self._configure_axes_labels()
 
@@ -740,6 +743,14 @@ class F1TelemetryApp:
             if telemetry is None:
                 continue
             self.current_telemetry.append(
+                {
+                    "driver": sel["driver"],
+                    "lap": sel["lap"],
+                    "color": sel["color"],
+                    "telemetry": telemetry,
+                }
+            )
+            self.multi_telemetry.append(
                 {
                     "driver": sel["driver"],
                     "lap": sel["lap"],
@@ -770,11 +781,124 @@ class F1TelemetryApp:
             color=self.fg_color,
         )
         self.fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+        self._annotate_speed_braking_points()
         self.canvas.draw()
         self.base_xlim = self.ax_speed.get_xlim()
 
         drivers_desc = ", ".join(title_parts)
         self.status_var.set(f"Confronto completato: {drivers_desc}.")
+
+    def _annotate_speed_braking_points(self):
+        if not self.multi_telemetry or len(self.multi_telemetry) < 2:
+            return
+
+        for txt in list(self.ax_speed.texts):
+            txt.remove()
+
+        candidate_points = []
+        window = 8
+        speed_delta_threshold = 25
+        cluster_radius = 15
+
+        for item in self.multi_telemetry:
+            tel = item.get("telemetry")
+            if tel is None or "Speed" not in tel or "Distance" not in tel:
+                continue
+
+            dist = tel["Distance"].values
+            speed = tel["Speed"].values
+            if len(speed) < 3:
+                continue
+
+            ds = np.diff(speed)
+            local_max = []
+            local_min = []
+
+            for i in range(1, len(speed) - 1):
+                if speed[i] >= speed[i - 1] and speed[i] >= speed[i + 1]:
+                    end = min(len(ds), i + window)
+                    trend = ds[i:end].mean() if end > i else 0
+                    drop_idx = min(len(speed) - 1, i + 10)
+                    drop = speed[i] - speed[drop_idx]
+                    if trend < -0.1 and drop >= speed_delta_threshold:
+                        local_max.append(i)
+
+                if speed[i] <= speed[i - 1] and speed[i] <= speed[i + 1]:
+                    end = min(len(ds), i + window)
+                    trend = ds[i:end].mean() if end > i else 0
+                    rise_idx = min(len(speed) - 1, i + 10)
+                    rise = speed[rise_idx] - speed[i]
+                    if trend > 0.1 and rise >= speed_delta_threshold:
+                        local_min.append(i)
+
+            for idx in local_max:
+                candidate_points.append({"distance": dist[idx], "kind": "max"})
+            for idx in local_min:
+                candidate_points.append({"distance": dist[idx], "kind": "min"})
+
+        if not candidate_points:
+            return
+
+        clusters = []
+        for point in sorted(candidate_points, key=lambda p: p["distance"]):
+            assigned = False
+            for cluster in clusters:
+                if abs(point["distance"] - cluster["center"]) <= cluster_radius:
+                    cluster["points"].append(point)
+                    cluster["center"] = sum(p["distance"] for p in cluster["points"]) / len(cluster["points"])
+                    assigned = True
+                    break
+            if not assigned:
+                clusters.append({"center": point["distance"], "points": [point]})
+
+        clusters = sorted(clusters, key=lambda c: c["center"])[:15]
+
+        for idx, cluster in enumerate(clusters):
+            cluster_distance = cluster["center"]
+            label_lines = []
+            speeds_at_cluster = []
+
+            for item in self.multi_telemetry:
+                tel = item.get("telemetry")
+                if tel is None or "Distance" not in tel or "Speed" not in tel:
+                    continue
+                nearest_idx = (tel["Distance"] - cluster_distance).abs().idxmin()
+                row = tel.loc[nearest_idx]
+                speed_value = row.get("Speed")
+                if speed_value is None or (isinstance(speed_value, float) and math.isnan(speed_value)):
+                    continue
+                label_lines.append(f"{item['driver']} Lap {item['lap']}: {speed_value:.1f} km/h")
+                speeds_at_cluster.append(speed_value)
+
+            if not label_lines or not speeds_at_cluster:
+                continue
+
+            y_value = float(np.mean(speeds_at_cluster))
+
+            kinds = [p["kind"] for p in cluster["points"]]
+            dominant_kind = max(set(kinds), key=kinds.count)
+
+            y_offset = 30 if dominant_kind == "max" else 40
+            x_offset = 5 if idx % 2 == 0 else -5
+
+            label_text = "\n".join(label_lines)
+
+            self.ax_speed.scatter(cluster_distance, y_value, color="white", s=25, zorder=5)
+            self.ax_speed.annotate(
+                label_text,
+                xy=(cluster_distance, y_value),
+                xytext=(cluster_distance + x_offset, y_value + y_offset),
+                textcoords="data",
+                arrowprops=dict(arrowstyle="->", color=self.fg_color),
+                fontsize=8,
+                color=self.fg_color,
+                bbox=dict(
+                    boxstyle="round,pad=0.3",
+                    facecolor=self.panel_color,
+                    edgecolor=self.grid_color,
+                    alpha=0.9,
+                ),
+            )
 
     def on_scroll(self, event):
         if event.inaxes is None or event.inaxes is not self.ax_speed:
