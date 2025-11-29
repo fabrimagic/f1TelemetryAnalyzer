@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import fastf1
 from fastf1 import plotting
 
@@ -9,7 +11,9 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
 # Abilita la cache locale di FastF1
-fastf1.Cache.enable_cache('f1_cache')
+CACHE_DIR = Path(r"X:\fastf1_cache")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+fastf1.Cache.enable_cache(CACHE_DIR)
 plotting.setup_mpl()  # opzionale, migliora lo stile dei grafici
 
 
