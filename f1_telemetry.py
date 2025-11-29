@@ -47,6 +47,9 @@ class F1TelemetryApp:
         self.point_detail_var = tk.StringVar(
             value="Clicca sul grafico della velocità per vedere il dettaglio."
         )
+        self.hover_detail_var = tk.StringVar(
+            value="Passa il mouse sul grafico della velocità per vedere i valori."
+        )
 
         # Costruisci interfaccia
         self._setup_theme()
@@ -299,6 +302,22 @@ class F1TelemetryApp:
         self.circuit_canvas_widget = self.circuit_canvas.get_tk_widget()
         self.circuit_canvas_widget.grid(row=0, column=0, sticky="nsew")
 
+        hover_frame = ttk.LabelFrame(
+            graph_frame,
+            text="Dettaglio in hover (velocità)",
+            padding=5,
+        )
+        hover_frame.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+        hover_frame.columnconfigure(0, weight=1)
+
+        hover_label = ttk.Label(
+            hover_frame,
+            textvariable=self.hover_detail_var,
+            anchor="w",
+            justify="left",
+        )
+        hover_label.grid(row=0, column=0, sticky="ew")
+
         # Label info in basso (facoltativa)
         self.status_var = tk.StringVar(value="Carica una sessione per iniziare.")
         status_label = ttk.Label(self.root, textvariable=self.status_var, anchor="w", padding=(10, 2))
@@ -306,10 +325,12 @@ class F1TelemetryApp:
 
         self.canvas.mpl_connect("scroll_event", self.on_scroll)
         self.canvas.mpl_connect("button_press_event", self.on_speed_click)
+        self.canvas.mpl_connect("motion_notify_event", self.on_speed_hover)
 
         self._apply_axes_style()
         self._configure_axes_labels()
         self.base_xlim = None
+        self.circuit_hover_markers = []
 
     # ------------------------------------------------------------------
     # CALLBACKS
@@ -567,6 +588,29 @@ class F1TelemetryApp:
             ax.yaxis.label.set_color(self.fg_color)
         self.ax_drs.xaxis.label.set_color(self.fg_color)
 
+    def _get_coordinate_columns(self, telemetry):
+        coord_candidates = [
+            ("X", "Y"),
+            ("PositionX", "PositionY"),
+            ("posX", "posY"),
+            ("PosX", "PosY"),
+        ]
+        for cand_x, cand_y in coord_candidates:
+            if cand_x in telemetry.columns and cand_y in telemetry.columns:
+                return cand_x, cand_y
+        return None, None
+
+    def _clear_circuit_hover_markers(self):
+        if not self.circuit_hover_markers:
+            return False
+        for artist in self.circuit_hover_markers:
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self.circuit_hover_markers = []
+        return True
+
     def _get_fastest_lap_number(self, laps):
         if laps is None or len(laps) == 0:
             return None
@@ -822,6 +866,58 @@ class F1TelemetryApp:
             ax.set_xlim(new_xmin, new_xmax)
 
         self.canvas.draw_idle()
+
+    def on_speed_hover(self, event):
+        if event.inaxes is None or event.inaxes is not self.ax_speed:
+            return
+        if event.xdata is None or not self.current_telemetry:
+            return
+
+        x_hover = event.xdata
+        hover_lines = []
+        removed_markers = self._clear_circuit_hover_markers()
+
+        for item in self.current_telemetry:
+            tel = item.get("telemetry")
+            if tel is None or "Distance" not in tel:
+                continue
+
+            idx = (tel["Distance"] - x_hover).abs().idxmin()
+            row = tel.loc[idx]
+
+            distance = row.get("Distance")
+            speed = row.get("Speed")
+            lap_num = item.get("lap")
+            driver = item.get("driver")
+            color = item.get("color", self.accent_color)
+
+            x_col, y_col = self._get_coordinate_columns(tel)
+            if x_col and y_col and x_col in row and y_col in row:
+                x_pos = row.get(x_col)
+                y_pos = row.get(y_col)
+                try:
+                    marker = self.ax_circuit.scatter(x_pos, y_pos, s=30, color=color, zorder=5)
+                    self.circuit_hover_markers.append(marker)
+                except Exception:
+                    pass
+
+            try:
+                hover_line = (
+                    f"{driver} Lap {lap_num}: {speed:.1f} km/h a {distance:.1f} m"
+                )
+            except Exception:
+                hover_line = f"{driver} Lap {lap_num}: dati non disponibili"
+            hover_lines.append(hover_line)
+
+        if self.circuit_hover_markers or removed_markers:
+            self.circuit_canvas.draw_idle()
+
+        if hover_lines:
+            self.hover_detail_var.set("\n".join(hover_lines))
+        else:
+            self.hover_detail_var.set(
+                "Passa il mouse sul grafico della velocità per vedere i valori."
+            )
 
     def on_speed_click(self, event):
         if event.inaxes is None or event.inaxes is not self.ax_speed:
