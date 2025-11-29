@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 
 import fastf1
 from fastf1 import plotting
@@ -39,6 +40,11 @@ class F1TelemetryApp:
         self.driver_map = {}   # indice listbox -> (driver_num, abbrev, nome)
         self.laps = None       # Laps del pilota selezionato
         self.selected_driver_abbrev = None
+        self.current_telemetry = []
+
+        self.point_detail_var = tk.StringVar(
+            value="Clicca sul grafico della velocità per vedere il dettaglio."
+        )
 
         # Costruisci interfaccia
         self._setup_theme()
@@ -259,13 +265,33 @@ class F1TelemetryApp:
         self.canvas_widget = self.canvas.get_tk_widget()
         self.canvas_widget.grid(row=0, column=0, sticky="nsew")
 
+        detail_frame = ttk.LabelFrame(
+            graph_frame,
+            text="Dettaglio punto selezionato",
+            padding=5,
+        )
+        detail_frame.grid(row=1, column=0, sticky="ew", pady=(5, 0))
+        detail_frame.columnconfigure(0, weight=1)
+
+        detail_label = ttk.Label(
+            detail_frame,
+            textvariable=self.point_detail_var,
+            anchor="w",
+            justify="left",
+        )
+        detail_label.grid(row=0, column=0, sticky="ew")
+
         # Label info in basso (facoltativa)
         self.status_var = tk.StringVar(value="Carica una sessione per iniziare.")
         status_label = ttk.Label(self.root, textvariable=self.status_var, anchor="w", padding=(10, 2))
         status_label.grid(row=1, column=0, columnspan=2, sticky="ew")
 
+        self.canvas.mpl_connect("scroll_event", self.on_scroll)
+        self.canvas.mpl_connect("button_press_event", self.on_speed_click)
+
         self._apply_axes_style()
         self._configure_axes_labels()
+        self.base_xlim = None
 
     # ------------------------------------------------------------------
     # CALLBACKS
@@ -489,9 +515,19 @@ class F1TelemetryApp:
             pass
 
     def plot_single_driver_lap(self, driver_abbrev: str, lap_number: int):
+        self.current_telemetry = []
         telemetry = self._get_lap_telemetry(driver_abbrev, lap_number)
         if telemetry is None:
             return
+
+        self.current_telemetry.append(
+            {
+                "driver": driver_abbrev,
+                "lap": lap_number,
+                "color": self.accent_color,
+                "telemetry": telemetry,
+            }
+        )
 
         self._clear_axes()
         self._configure_axes_labels()
@@ -510,6 +546,7 @@ class F1TelemetryApp:
         )
         self.fig.tight_layout(rect=[0, 0.03, 1, 0.95])
         self.canvas.draw()
+        self.base_xlim = self.ax_speed.get_xlim()
 
         self._highlight_lap_in_list(lap_number)
         self.status_var.set(f"Mostrata telemetria {driver_abbrev} - giro {lap_number}.")
@@ -587,6 +624,7 @@ class F1TelemetryApp:
         self.plot_multi_driver_telemetry(selections)
 
     def plot_multi_driver_telemetry(self, selections):
+        self.current_telemetry = []
         self._clear_axes()
         self._configure_axes_labels()
 
@@ -597,6 +635,14 @@ class F1TelemetryApp:
             telemetry = self._get_lap_telemetry(sel["driver"], sel["lap"])
             if telemetry is None:
                 continue
+            self.current_telemetry.append(
+                {
+                    "driver": sel["driver"],
+                    "lap": sel["lap"],
+                    "color": sel["color"],
+                    "telemetry": telemetry,
+                }
+            )
             line = self._plot_telemetry_series(sel["driver"], sel["lap"], telemetry, sel["color"], add_label=True)
             legend_lines.append(line)
             legend_labels.append(f"{sel['driver']} Lap {sel['lap']}")
@@ -621,9 +667,92 @@ class F1TelemetryApp:
         )
         self.fig.tight_layout(rect=[0, 0.03, 1, 0.95])
         self.canvas.draw()
+        self.base_xlim = self.ax_speed.get_xlim()
 
         drivers_desc = ", ".join(title_parts)
         self.status_var.set(f"Confronto completato: {drivers_desc}.")
+
+    def on_scroll(self, event):
+        if event.inaxes is None or event.inaxes is not self.ax_speed:
+            return
+        if event.xdata is None:
+            return
+
+        if self.base_xlim is None:
+            self.base_xlim = self.ax_speed.get_xlim()
+
+        xmin, xmax = self.ax_speed.get_xlim()
+        scale_factor = 1.2
+
+        if event.button == 'up':
+            scale = 1 / scale_factor
+        elif event.button == 'down':
+            scale = scale_factor
+        else:
+            return
+
+        xdata = event.xdata
+        new_xmin = xdata - (xdata - xmin) * scale
+        new_xmax = xdata + (xmax - xdata) * scale
+
+        if self.base_xlim is not None:
+            base_xmin, base_xmax = self.base_xlim
+            new_xmin = max(new_xmin, base_xmin)
+            new_xmax = min(new_xmax, base_xmax)
+
+        if new_xmax - new_xmin < 1.0:
+            return
+
+        for ax in [self.ax_speed, self.ax_throttle, self.ax_brake, self.ax_gear, self.ax_drs]:
+            ax.set_xlim(new_xmin, new_xmax)
+
+        self.canvas.draw_idle()
+
+    def on_speed_click(self, event):
+        if event.inaxes is None or event.inaxes is not self.ax_speed:
+            return
+        if event.xdata is None or not self.current_telemetry:
+            return
+
+        x_click = event.xdata
+        lines = []
+
+        for item in self.current_telemetry:
+            tel = item.get("telemetry")
+            if tel is None or "Distance" not in tel:
+                continue
+            distances = tel["Distance"]
+            idx = (distances - x_click).abs().idxmin()
+            row = tel.loc[idx]
+
+            distance = row.get("Distance")
+            speed = row.get("Speed")
+            throttle = row.get("Throttle")
+            brake = row.get("Brake")
+            gear = row.get("nGear")
+            drs = row.get("DRS")
+
+            if gear is None or (isinstance(gear, float) and math.isnan(gear)):
+                gear_display = "N/A"
+            else:
+                gear_display = int(gear)
+
+            line = (
+                f"{item['driver']} Lap {item['lap']}: "
+                f"dist={distance:.1f} m, "
+                f"speed={speed:.1f} km/h, "
+                f"throttle={throttle:.1f} %, "
+                f"brake={brake:.2f}, "
+                f"gear={gear_display}, "
+                f"DRS={drs}"
+            )
+            lines.append(line)
+
+        if lines:
+            self.point_detail_var.set("\n".join(lines))
+            self.status_var.set(f"Punto selezionato a distanza ~{x_click:.1f} m.")
+        else:
+            self.point_detail_var.set("Clicca sul grafico della velocità per vedere il dettaglio.")
 
 def main():
     root = tk.Tk()
