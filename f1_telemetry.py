@@ -120,7 +120,8 @@ class F1TelemetryApp:
 
         right_frame = ttk.Frame(self.root, padding=10)
         right_frame.grid(row=0, column=1, sticky="nsew")
-        right_frame.rowconfigure(0, weight=1)
+        right_frame.rowconfigure(0, weight=3)
+        right_frame.rowconfigure(1, weight=2)
         right_frame.columnconfigure(0, weight=1)
 
         # -------------------- PANNELLO SESSIONE -------------------------
@@ -248,12 +249,12 @@ class F1TelemetryApp:
 
         # ----------------------- AREA GRAFICO ---------------------------
         graph_frame = ttk.LabelFrame(right_frame, text="Telemetria", padding=5)
-        graph_frame.grid(row=0, column=0, sticky="nsew")
+        graph_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
         graph_frame.rowconfigure(0, weight=1)
         graph_frame.columnconfigure(0, weight=1)
 
         # Figura matplotlib con 5 sottoplot
-        self.fig = Figure(figsize=(10, 8), dpi=100)
+        self.fig = Figure(figsize=(10, 6), dpi=100)
         self.fig.patch.set_facecolor(self.bg_color)
         self.ax_speed = self.fig.add_subplot(511)
         self.ax_throttle = self.fig.add_subplot(512, sharex=self.ax_speed)
@@ -280,6 +281,21 @@ class F1TelemetryApp:
             justify="left",
         )
         detail_label.grid(row=0, column=0, sticky="ew")
+
+        # ----------------------- LAYOUT CIRCUITO ---------------------------
+        circuit_frame = ttk.LabelFrame(right_frame, text="Layout circuito", padding=5)
+        circuit_frame.grid(row=1, column=0, sticky="nsew")
+        circuit_frame.rowconfigure(0, weight=1)
+        circuit_frame.columnconfigure(0, weight=1)
+
+        self.circuit_fig = Figure(figsize=(10, 3.5), dpi=100)
+        self.circuit_fig.patch.set_facecolor(self.bg_color)
+        self.ax_circuit = self.circuit_fig.add_subplot(111)
+        self._apply_circuit_axes_style()
+
+        self.circuit_canvas = FigureCanvasTkAgg(self.circuit_fig, master=circuit_frame)
+        self.circuit_canvas_widget = self.circuit_canvas.get_tk_widget()
+        self.circuit_canvas_widget.grid(row=0, column=0, sticky="nsew")
 
         # Label info in basso (facoltativa)
         self.status_var = tk.StringVar(value="Carica una sessione per iniziare.")
@@ -326,6 +342,7 @@ class F1TelemetryApp:
         # Popola lista piloti
         self.populate_drivers()
         self.status_var.set(f"Sessione caricata: {year} - {event} - {sess_name}")
+        self.plot_circuit_layout()
 
     def populate_drivers(self):
         self.drivers_listbox.delete(0, tk.END)
@@ -439,6 +456,93 @@ class F1TelemetryApp:
                 spine.set_color(self.grid_color)
             ax.yaxis.label.set_color(self.fg_color)
             ax.xaxis.label.set_color(self.fg_color)
+
+    def _apply_circuit_axes_style(self):
+        self.ax_circuit.set_facecolor(self.panel_color)
+        self.ax_circuit.tick_params(colors=self.fg_color, labelcolor=self.fg_color)
+        for spine in self.ax_circuit.spines.values():
+            spine.set_color(self.grid_color)
+
+    def _finalize_circuit_axes(self, title: str | None = None):
+        self.ax_circuit.set_aspect("equal", adjustable="datalim")
+        self.ax_circuit.set_xticks([])
+        self.ax_circuit.set_yticks([])
+        self.ax_circuit.set_xlabel("")
+        self.ax_circuit.set_ylabel("")
+        if title:
+            self.ax_circuit.set_title(title, color=self.fg_color)
+
+    def _show_circuit_unavailable(self, message: str):
+        self.ax_circuit.clear()
+        self._apply_circuit_axes_style()
+        self.ax_circuit.text(
+            0.5,
+            0.5,
+            "Layout non disponibile",
+            ha="center",
+            va="center",
+            transform=self.ax_circuit.transAxes,
+            color=self.fg_color,
+        )
+        self._finalize_circuit_axes()
+        self.circuit_canvas.draw_idle()
+        self.status_var.set(message)
+
+    def plot_circuit_layout(self):
+        if self.session is None:
+            self._show_circuit_unavailable("Carica una sessione per visualizzare il layout del circuito.")
+            return
+
+        self.ax_circuit.clear()
+        self._apply_circuit_axes_style()
+
+        try:
+            drivers = list(self.session.drivers)
+            if not drivers:
+                raise ValueError("Nessun pilota disponibile nella sessione.")
+
+            base_driver = drivers[0]
+            laps = self.session.laps.pick_driver(base_driver)
+            if laps is None or len(laps) == 0:
+                raise ValueError("Nessun giro disponibile per il pilota selezionato per il layout.")
+
+            lap = laps.pick_fastest()
+            if lap is None:
+                raise ValueError("Impossibile individuare un giro valido per il layout.")
+
+            tel = lap.get_telemetry()
+            if tel is None or tel.empty:
+                raise ValueError("Telemetria del giro non disponibile.")
+
+            coord_candidates = [
+                ("X", "Y"),
+                ("PositionX", "PositionY"),
+                ("posX", "posY"),
+                ("PosX", "PosY"),
+            ]
+            x_col = y_col = None
+            for cand_x, cand_y in coord_candidates:
+                if cand_x in tel.columns and cand_y in tel.columns:
+                    x_col, y_col = cand_x, cand_y
+                    break
+
+            if x_col is None or y_col is None:
+                raise ValueError("Telemetria priva di coordinate X/Y per il layout.")
+
+            self.ax_circuit.plot(tel[x_col], tel[y_col], color=self.accent_color, linewidth=1.5)
+
+            event_name = None
+            try:
+                event_name = self.session.event.get("EventName") or self.session.event.get("OfficialEventName")
+            except Exception:
+                event_name = None
+            title = event_name or "Layout circuito"
+
+            self._finalize_circuit_axes(title)
+            self.circuit_canvas.draw_idle()
+            self.status_var.set("Layout circuito aggiornato.")
+        except Exception as exc:
+            self._show_circuit_unavailable(f"Layout circuito non disponibile: {exc}")
 
     def _clear_axes(self):
         self.ax_speed.clear()
