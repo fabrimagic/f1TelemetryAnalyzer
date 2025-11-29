@@ -258,14 +258,15 @@ class F1TelemetryApp:
         graph_frame.rowconfigure(0, weight=1)
         graph_frame.columnconfigure(0, weight=1)
 
-        # Figura matplotlib con 5 sottoplot
-        self.fig = Figure(figsize=(10, 6), dpi=100)
+        # Figura matplotlib con 6 sottoplot
+        self.fig = Figure(figsize=(10, 7), dpi=100)
         self.fig.patch.set_facecolor(self.bg_color)
-        self.ax_speed = self.fig.add_subplot(511)
-        self.ax_throttle = self.fig.add_subplot(512, sharex=self.ax_speed)
-        self.ax_brake = self.fig.add_subplot(513, sharex=self.ax_speed)
-        self.ax_gear = self.fig.add_subplot(514, sharex=self.ax_speed)
-        self.ax_drs = self.fig.add_subplot(515, sharex=self.ax_speed)
+        self.ax_speed = self.fig.add_subplot(611)
+        self.ax_throttle = self.fig.add_subplot(612, sharex=self.ax_speed)
+        self.ax_brake = self.fig.add_subplot(613, sharex=self.ax_speed)
+        self.ax_gear = self.fig.add_subplot(614, sharex=self.ax_speed)
+        self.ax_drs = self.fig.add_subplot(615, sharex=self.ax_speed)
+        self.ax_gap = self.fig.add_subplot(616, sharex=self.ax_speed)
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
         self.canvas_widget = self.canvas.get_tk_widget()
@@ -471,7 +472,7 @@ class F1TelemetryApp:
     # TELEMETRIA
     # ------------------------------------------------------------------
     def _apply_axes_style(self):
-        for ax in [self.ax_speed, self.ax_throttle, self.ax_brake, self.ax_gear, self.ax_drs]:
+        for ax in [self.ax_speed, self.ax_throttle, self.ax_brake, self.ax_gear, self.ax_drs, self.ax_gap]:
             ax.set_facecolor(self.panel_color)
             ax.grid(True, color=self.grid_color, alpha=0.6)
             ax.tick_params(colors=self.fg_color, labelcolor=self.fg_color)
@@ -573,6 +574,7 @@ class F1TelemetryApp:
         self.ax_brake.clear()
         self.ax_gear.clear()
         self.ax_drs.clear()
+        self.ax_gap.clear()
         self._apply_axes_style()
 
     def _configure_axes_labels(self):
@@ -583,10 +585,12 @@ class F1TelemetryApp:
         self.ax_brake.set_ylim(-0.05, 1.05)
         self.ax_gear.set_ylabel("Marcia")
         self.ax_drs.set_ylabel("DRS")
-        self.ax_drs.set_xlabel("Distanza [m]")
-        for ax in [self.ax_speed, self.ax_throttle, self.ax_brake, self.ax_gear, self.ax_drs]:
+        self.ax_drs.set_xlabel("")
+        self.ax_gap.set_ylabel("Gap tempo\n[s]")
+        self.ax_gap.set_xlabel("Distanza [m]")
+        for ax in [self.ax_speed, self.ax_throttle, self.ax_brake, self.ax_gear, self.ax_drs, self.ax_gap]:
             ax.yaxis.label.set_color(self.fg_color)
-        self.ax_drs.xaxis.label.set_color(self.fg_color)
+        self.ax_gap.xaxis.label.set_color(self.fg_color)
 
     def _get_coordinate_columns(self, telemetry):
         coord_candidates = [
@@ -652,6 +656,106 @@ class F1TelemetryApp:
         self.ax_gear.plot(x, telemetry['nGear'], color=color)
         self.ax_drs.step(x, telemetry['DRS'], where='post', color=color)
         return speed_line
+
+    def _plot_time_gap(self):
+        if len(self.multi_telemetry) < 2:
+            self.ax_gap.clear()
+            self._apply_axes_style()
+            self.ax_gap.set_ylabel("Gap tempo\n[s]")
+            self.ax_gap.set_xlabel("Distanza [m]")
+            self.ax_gap.text(
+                0.5,
+                0.5,
+                "Gap disponibile solo con 2 o 3 piloti",
+                ha="center",
+                va="center",
+                transform=self.ax_gap.transAxes,
+                color=self.fg_color,
+            )
+            self.fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+            self.canvas.draw_idle()
+            return
+
+        self.ax_gap.clear()
+        self._apply_axes_style()
+        self.ax_gap.set_ylabel("Gap tempo\n[s]")
+        self.ax_gap.set_xlabel("Distanza [m]")
+
+        telemetry_entries = []
+        for item in self.multi_telemetry:
+            tel = item.get("telemetry")
+            if tel is None or "Distance" not in tel.columns:
+                continue
+
+            if "Time" in tel.columns:
+                time_series = tel["Time"]
+            elif "SessionTime" in tel.columns:
+                time_series = tel["SessionTime"]
+            else:
+                continue
+
+            try:
+                time_seconds = (time_series - time_series.iloc[0]).dt.total_seconds()
+            except Exception:
+                try:
+                    time_seconds = time_series - time_series.iloc[0]
+                except Exception:
+                    continue
+
+            telemetry_entries.append(
+                {
+                    "driver": item.get("driver"),
+                    "color": item.get("color", self.accent_color),
+                    "distance": tel["Distance"].values,
+                    "time": np.asarray(time_seconds, dtype=float),
+                }
+            )
+
+        if len(telemetry_entries) < 2:
+            self.ax_gap.text(
+                0.5,
+                0.5,
+                "Gap disponibile solo con dati completi",
+                ha="center",
+                va="center",
+                transform=self.ax_gap.transAxes,
+                color=self.fg_color,
+            )
+            self.fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+            self.canvas.draw_idle()
+            return
+
+        d_max = min(np.max(entry["distance"]) for entry in telemetry_entries)
+        dist_common = np.linspace(0, d_max, num=1000)
+
+        # Usa il primo pilota selezionato come riferimento per il calcolo del gap
+        reference_entry = telemetry_entries[0]
+        t_ref = np.interp(dist_common, reference_entry["distance"], reference_entry["time"])
+
+        for entry in telemetry_entries:
+            t_interp = np.interp(dist_common, entry["distance"], entry["time"])
+            gap = t_interp - t_ref
+
+            if entry is reference_entry:
+                label = f"{entry['driver']} (riferimento)"
+            else:
+                label = f"{entry['driver']} vs ref"
+
+            self.ax_gap.plot(dist_common, gap, color=entry["color"], label=label)
+
+        self.ax_gap.axhline(0, color=self.grid_color, linestyle="--", linewidth=1)
+
+        gap_legend = self.ax_gap.legend(
+            loc="upper right",
+            facecolor=self.panel_color,
+            edgecolor=self.grid_color,
+            labelcolor=self.fg_color,
+        )
+        for text in gap_legend.get_texts():
+            text.set_color(self.fg_color)
+
+        self.fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+        self.canvas.draw_idle()
 
     def _highlight_lap_in_list(self, lap_number: int):
         try:
@@ -824,6 +928,7 @@ class F1TelemetryApp:
             fontsize=12,
             color=self.fg_color,
         )
+        self._plot_time_gap()
         self.fig.tight_layout(rect=[0, 0.03, 1, 0.95])
         self.canvas.draw()
         self.base_xlim = self.ax_speed.get_xlim()
@@ -862,7 +967,7 @@ class F1TelemetryApp:
         if new_xmax - new_xmin < 1.0:
             return
 
-        for ax in [self.ax_speed, self.ax_throttle, self.ax_brake, self.ax_gear, self.ax_drs]:
+        for ax in [self.ax_speed, self.ax_throttle, self.ax_brake, self.ax_gear, self.ax_drs, self.ax_gap]:
             ax.set_xlim(new_xmin, new_xmax)
 
         self.canvas.draw_idle()
