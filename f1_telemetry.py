@@ -179,7 +179,15 @@ class F1TelemetryApp:
         for idx, drv_num in enumerate(self.drivers):
             drv_info = self.session.get_driver(drv_num)
             abbrev = drv_info['Abbreviation']
-            name = f"{drv_info['Surname']} ({abbrev})"
+            surname = (
+                drv_info.get('Surname')
+                or drv_info.get('LastName')
+                or drv_info.get('FamilyName')
+                or drv_info.get('FullName')
+                or drv_info.get('BroadcastName')
+                or str(drv_num)
+            )
+            name = f"{surname} ({abbrev})"
             display = f"{drv_num:>3} - {name}"
             self.drivers_listbox.insert(tk.END, display)
             self.driver_map[idx] = (drv_num, abbrev, name)
